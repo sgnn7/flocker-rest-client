@@ -9,6 +9,7 @@ import inspect
 import json
 import os
 import ssl
+import sys
 import tempfile
 
 class FlockerApi(object):
@@ -51,23 +52,34 @@ class FlockerApi(object):
                                                         control_port,
                                                         context=ssl_context)
 
+    @property
+    def debug(self):
+        return self._debug
+
+    @debug.setter
+    def debug(self, value):
+        self._debug = value
+
     # XXX: These should really be generic functions created dynamically
-    def get(self, endpoint, data = None):
+    def get(self, endpoint, data = None, quiet = False):
         return self._make_api_request('GET',
                                       "/v%s/%s" % (self._api_version, endpoint),
-                                      data)
+                                      data,
+                                      quiet)
 
-    def post(self, endpoint, data = None):
+    def post(self, endpoint, data = None, quiet = False):
         return self._make_api_request('POST',
                                       "/v%s/%s" % (self._api_version, endpoint),
-                                      data)
+                                      data,
+                                      quiet)
 
-    def delete(self, endpoint, data = None):
+    def delete(self, endpoint, data = None, quiet = False):
         return self._make_api_request('DELETE',
                                       "/v%s/%s" % (self._api_version, endpoint),
-                                      data)
+                                      data,
+                                      quiet)
 
-    def _make_api_request(self, method, endpoint, data = None):
+    def _make_api_request(self, method, endpoint, data = None, quiet = False):
       # Convert data to string if it's not yet in this format
       if data and not isinstance(data, str):
           data = json.dumps(data).encode('utf-8')
@@ -88,16 +100,17 @@ class FlockerApi(object):
       if 'X-Configuration-Tag' in response.getheaders():
           self._last_known_config = response.getheaders()['X-Configuration-Tag'].decode('utf-8')
 
-      print('Status:', status)
+      if self.debug:
+          print('Status:', status)
+          print()
 
       # If you want verbose debugging
       # print('Body:', body)
 
-      print()
 
       result = json.loads(body.decode('utf-8'))
 
-      if self._debug == True:
+      if not quiet:
           print(json.dumps(result, sort_keys=True, indent=4))
 
       return result
@@ -129,6 +142,13 @@ class FlockerApi(object):
 
     @cli_method
     def create_volume(self, name, size_in_gb, primary_id, profile = None):
+        # Sanity check
+        volumes = self.list_volumes(quiet=True)
+        for volume in volumes:
+            if volume['metadata']['name'] == name:
+                sys.stderr.write("ERROR! Cannot create volume with same name (%s)!\n" % (name))
+                sys.exit(1)
+
         if not isinstance(size_in_gb, int):
             size_in_gb = int(size_in_gb)
 
@@ -156,8 +176,8 @@ class FlockerApi(object):
         return self.delete('configuration/datasets/%s' % dataset_id)
 
     @cli_method
-    def list_volumes(self):
-        return self.get('configuration/datasets')
+    def list_volumes(self, quiet = False):
+        return self.get('configuration/datasets', quiet=quiet)
 
     @cli_method
     def list_nodes(self):
@@ -181,10 +201,14 @@ class FlockerApi(object):
 if __name__ == '__main__':
     # We only parse args if we're invoked as a script
     import argparse
-    api = FlockerApi(debug = True)
+    api = FlockerApi()
 
     parser = argparse.ArgumentParser()
     subparsers = parser.add_subparsers(dest='action')
+
+    parser.add_argument('-d', '--debug',
+                        help="Enable debugging",
+                        action='store_true')
 
     # Dynamically add all relevant cli methods
     for method_name in api.get_methods():
@@ -194,6 +218,7 @@ if __name__ == '__main__':
         args = inspect.getargspec(func)
 
         parser_for_method = subparsers.add_parser(method_name, help = help_line)
+        arg_length = len(args.args)
         # Mandatory args
         for index, arg in enumerate(args.args):
             # Skip 'self'
@@ -204,13 +229,21 @@ if __name__ == '__main__':
             if index < len(args.args) - len(args.defaults or []):
                 parser_for_method.add_argument(arg)
             else:
-                parser_for_method.add_argument('--%s' % arg, default=args.defaults[len(args.args) - index - 1])
+                default_value = args.defaults[arg_length - index - 1]
+                if default_value == True:
+                    parser_for_method.add_argument('--%s' % arg, default=default_value, action='store_false')
+                elif default_value == False:
+                    parser_for_method.add_argument('--%s' % arg, default=default_value, action='store_true')
+                else:
+                    parser_for_method.add_argument('--%s' % arg, default=default_value)
 
     parsed_args = parser.parse_args()
-
     action = parsed_args.action
 
-    print("Action:", parsed_args.action)
+    api.debug = parsed_args.debug == True
+
+    if api.debug:
+        print("Action:", parsed_args.action)
 
     func = getattr(api, action)
     args = inspect.getargspec(func)
@@ -221,5 +254,8 @@ if __name__ == '__main__':
             continue
 
         args_to_send.append(vars(parsed_args)[arg])
-    print('Args:', args_to_send)
+
+    if api.debug:
+        print('Args:', args_to_send)
+
     func(*args_to_send)
